@@ -30,12 +30,16 @@ def main(argv=None) -> int:
         print("Telegram webhook registered.")
         return 0
     if cmd == "chat-id":
-        ids = private_chat_ids(cfg.telegram_token)
+        try:
+            ids = private_chat_ids(cfg.telegram_token)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         if not ids:
-            print("No private chats found. Open your bot in Telegram, press Start and send it a message.")
+            print("No private messages found. Rerun chat-id, then press Start and send a new message to the link shown.")
             return 2
         for chat_id in ids:
-            print(chat_id)
+            print(f"TELEGRAM_CHAT_ID={chat_id}")
         return 0
 
     if cmd not in {"morning", "evening", "consolidate", "check"}:

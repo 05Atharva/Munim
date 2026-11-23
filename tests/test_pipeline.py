@@ -14,7 +14,7 @@ from bot.consolidate import run_consolidation
 from bot.digest import run_digest
 from bot.llm import parse_json
 from bot.store import LocalStore
-from bot.telegram import TelegramRejected, _split
+from bot.telegram import TelegramRejected, _split, private_chat_ids
 from bot.store import SupabaseStore
 
 
@@ -227,3 +227,43 @@ def test_supabase_accepts_new_secret_and_legacy_jwt():
     legacy = SupabaseStore("https://example.supabase.co", "legacy.example.jwt")
     assert secret.h["apikey"] == "sb_secret_example" and "Authorization" not in secret.h
     assert legacy.h["Authorization"] == "Bearer legacy.example.jwt"
+
+
+def test_chat_id_identifies_bot_and_filters_out_group_messages(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    calls = []
+    results = {
+        "getMe": {"username": "ExampleMunimBot"},
+        "getUpdates": [
+            {"message": {"chat": {"id": -11, "type": "group"}}},
+            {"message": {"chat": {"id": 42, "type": "private"}}},
+        ],
+    }
+
+    def request(token, method, payload, timeout=30):
+        calls.append((method, payload, timeout))
+        return SimpleNamespace(status_code=200, json=lambda: {"result": results[method]})
+
+    monkeypatch.setattr("bot.telegram._api_request", request)
+    assert private_chat_ids("test-token") == [42]
+    assert calls == [("getMe", {}, 30), ("getUpdates", {"allowed_updates": ["message"], "timeout": 45}, 55)]
+    assert "https://t.me/ExampleMunimBot" in capsys.readouterr().out
+
+
+def test_chat_id_explains_existing_webhook(monkeypatch):
+    from types import SimpleNamespace
+
+    results = {
+        "getMe": (200, {"username": "ExampleMunimBot"}),
+        "getUpdates": (409, {}),
+        "getWebhookInfo": (200, {"url": "https://example.com/telegram"}),
+    }
+
+    def request(token, method, payload, timeout=30):
+        status, result = results[method]
+        return SimpleNamespace(status_code=status, json=lambda: {"result": result})
+
+    monkeypatch.setattr("bot.telegram._api_request", request)
+    with pytest.raises(RuntimeError, match="webhook is already registered"):
+        private_chat_ids("test-token")

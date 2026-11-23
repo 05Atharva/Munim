@@ -15,7 +15,7 @@ GitHub Actions runs the Python jobs at **08:35 IST** and **18:15 IST** daily. A 
 ## Set up Telegram and Groq
 
 1. Create a bot using **@BotFather → /newbot**. Keep its token as `TELEGRAM_BOT_TOKEN`. Open the bot's private chat, press **Start** and send a message so Telegram exposes the chat to the bot.
-2. Run the following in PowerShell 7 from the project directory to print the private chat ID. If Python is installed as `py` on your machine, substitute `py` for `python`. If you already configured a webhook, obtain the ID from your existing configuration.
+2. Run the following in PowerShell 7 from the project directory. When the command shows a Telegram link, open it privately and send a fresh message while the command waits. If Python is installed as `py` on your machine, substitute `py` for `python`. If you already configured a webhook, obtain the ID from your existing configuration.
 
    ```powershell
    python -m pip install -r requirements-actions.txt
@@ -24,7 +24,7 @@ GitHub Actions runs the Python jobs at **08:35 IST** and **18:15 IST** daily. A 
    Remove-Item Env:TELEGRAM_BOT_TOKEN
    ```
 
-3. Save the numeric ID as `TELEGRAM_CHAT_ID`. Create a Groq key as `GROQ_API_KEY`. Defaults are `openai/gpt-oss-120b` and `openai/gpt-oss-20b`. If needed, override them with repository Actions variables `LLM_MODEL` and `LLM_FALLBACK_MODEL`.
+3. Copy the number after `TELEGRAM_CHAT_ID=`. Save it as the GitHub Actions secret `TELEGRAM_CHAT_ID`. Create a Groq key as `GROQ_API_KEY`. Defaults are `openai/gpt-oss-120b` and `openai/gpt-oss-20b`. If needed, override them with repository Actions variables `LLM_MODEL` and `LLM_FALLBACK_MODEL`.
 
 [Telegram BotFather tutorial](https://core.telegram.org/bots/tutorial) · [Groq API keys](https://console.groq.com/keys) · [Groq quotas](https://console.groq.com/docs/rate-limits)
 
