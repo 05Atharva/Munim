@@ -34,11 +34,12 @@ def _split(text: str, limit: int = LIMIT) -> list:
     return parts or [text[:limit]]
 
 
-def send_message(token: str, chat_id: str, text: str) -> None:
-    for index, chunk in enumerate(_split(text)):
-        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown", "disable_web_page_preview": True}
+def send_message(token: str, chat_id: str, text: str, *, parse_mode: str = "Markdown") -> None:
+    # Reports have a bounded visible length. Splitting HTML could break a tag or link.
+    for index, chunk in enumerate([text] if parse_mode == "HTML" else _split(text)):
+        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode, "disable_web_page_preview": True}
         r = _api_request(token, "sendMessage", payload)
-        if r.status_code == 400:  # Markdown parse error from model output -> resend as plain text
+        if r.status_code == 400 and parse_mode == "Markdown":
             payload.pop("parse_mode")
             r = _api_request(token, "sendMessage", payload)
         if r.status_code != 200:

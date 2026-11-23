@@ -3,15 +3,20 @@ Every source is wrapped so one failure never kills the digest - the bot just say
 import re
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 from html import unescape
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+US_EQUITIES = {"S&P 500", "Nasdaq"}
+INDIAN_EQUITIES = {"Sensex", "India VIX"}
+NON_EQUITY_BARS = {"USD/INR", "Brent crude", "Gold (USD)", "US 10Y yield", "Dollar index"}
 
 # Yahoo Finance symbols. (name -> symbol)
 TICKERS = {
@@ -47,7 +52,7 @@ FEEDS = {
     "Moneycontrol": "https://www.moneycontrol.com/rss/marketreports.xml",
     "Livemint Markets": "https://www.livemint.com/rss/markets",
     "Business Standard Markets": "https://www.business-standard.com/rss/markets-106.rss",
-    "Google News: Indian market": "https://news.google.com/rss/search?q=Sensex+Nifty+FII&hl=en-IN&gl=IN&ceid=IN:en",
+    "Google News: Indian market": "https://news.google.com/rss/search?q=Sensex+Nifty+market+close+when:2d&hl=en-IN&gl=IN&ceid=IN:en",
     "Google News: RBI/economy": "https://news.google.com/rss/search?q=RBI+rupee+India+economy&hl=en-IN&gl=IN&ceid=IN:en",
 }
 
@@ -82,6 +87,8 @@ def fetch_quotes() -> dict:
                              "chg_pct": round((last - prev) / prev * 100, 2),
                              "quote_time": str(closes.index[-1]), "retrieved_at": retrieved,
                              "source": "Yahoo Finance (unofficial)", "period": "daily bar"}
+                if name == "US 10Y yield":
+                    out[name]["change_bps"] = round((last - prev) * 100, 1)
             except Exception:
                 continue
     except Exception:
@@ -149,9 +156,9 @@ def fetch_headlines(per_feed: int = 8) -> list:
     return out
 
 
-def source_links(headlines: list, source_ids: list) -> str:
-    """Resolve model-selected references to URLs from the original feed items."""
-    links = {}
+def cited_articles(headlines: list, source_ids: list) -> dict:
+    """Resolve model-selected references to links from the original feed items."""
+    articles, seen = {}, set()
     for source_id in source_ids:
         if type(source_id) is not int or not 1 <= source_id <= len(headlines):
             continue
@@ -161,25 +168,73 @@ def source_links(headlines: list, source_ids: list) -> str:
             parsed = urlsplit(url)
         except ValueError:
             continue
-        if parsed.scheme in {"http", "https"} and parsed.hostname and len(url) <= 600:
-            links.setdefault(url, f"[{source_id}] {article['source']}\n{url}")
-        if len(links) == 3:
-            break
-    return "\n\nSources\n" + "\n".join(links.values()) if links else ""
+        if parsed.scheme in {"http", "https"} and parsed.hostname and len(url) <= 1500 and url not in seen:
+            articles[source_id] = article
+            seen.add(url)
+    return articles
 
 
-def format_snapshot(quotes: dict, headlines: list, max_headlines: int = 18) -> str:
-    lines = ["MARKET LEVELS (daily bars vs previous close; today's bar may be provisional):"]
+def bar_status(name: str, quote: dict) -> str:
+    if name in US_EQUITIES:
+        zone, opening, cutoff = "America/New_York", time(9, 30), time(16)
+    elif name.startswith("Nifty ") or name in INDIAN_EQUITIES:
+        # Leave time for closing auctions and provider updates after continuous trading.
+        zone, opening, cutoff = "Asia/Kolkata", time(9, 15), time(16)
+    else:
+        return "provider daily bar; close unverified"
+    try:
+        session = date.fromisoformat(quote["quote_time"][:10])
+        retrieved = datetime.fromisoformat(quote["retrieved_at"])
+        if retrieved.tzinfo is None:
+            return "daily bar; close unverified"
+        local = retrieved.astimezone(ZoneInfo(zone))
+    except (KeyError, TypeError, ValueError):
+        return "daily bar; close unverified"
+    if session < local.date():
+        return "prior session"
+    if session > local.date() or local.time() < opening:
+        return "provisional pre-open bar; omit from close analysis"
+    if local.time() < cutoff:
+        return "provisional intraday bar"
+    return "after regular session; provider close"
+
+
+def quote_move(name: str, quote: dict) -> str:
+    last, change = quote["last"], quote["chg_pct"]
+    if name == "US 10Y yield":
+        bps = quote.get("change_bps")
+        return f"{last:.2f}%" if bps is None else f"{last:.2f}% ({bps:+g} bps)"
+    if name == "USD/INR":
+        direction = "USD/INR lower, implying a stronger rupee on this feed" if change < 0 else (
+            "USD/INR higher, implying a weaker rupee on this feed" if change > 0 else "unchanged")
+        return f"₹{last:.2f} per USD ({change:+.2f}%; {direction})"
+    return f"{last:,.2f} ({change:+.2f}%)"
+
+
+def format_snapshot(quotes: dict, headlines: list, max_headlines: int = 18, *, for_digest: bool = False) -> str:
+    lines = ["MARKET LEVELS (daily bars vs previous bar; today's bar may be provisional):"]
     if quotes:
         for name, q in quotes.items():
-            lines.append(f"- {name}: {q['last']:,} ({q['chg_pct']:+.2f}%); session={q.get('quote_time', 'unknown')[:10]}")
+            status = bar_status(name, q)
+            if for_digest and name in NON_EQUITY_BARS:
+                # These bars lack a verified fixing/settlement time. Keep them in the raw
+                # snapshot without giving the model a mismatched baseline to build on.
+                lines.append(f"- {name}: no verified comparable close; use a dated report if supplied.")
+                continue
+            if for_digest and status.startswith("provisional"):
+                lines.append(f"- {name}: {status}; no completed close from this bar.")
+                continue
+            lines.append(f"- {name}: {quote_move(name, q)}; session={q.get('quote_time', 'unknown')[:10]}; {status}")
         quote = next(iter(quotes.values()))
         lines.append(f"Source: {quote.get('source', 'unknown')}; retrieved={quote.get('retrieved_at', 'unknown')}")
     else:
         lines.append("- (price data unavailable this run - say so, do not invent levels)")
     sector_names = ["Nifty IT", "Nifty Pharma", "Nifty Auto", "Nifty Metal", "Nifty Realty",
                     "Nifty FMCG", "Nifty Energy", "Nifty PSU Bank", "Nifty Infrastructure"]
-    available_sectors = [(name, quotes[name]["chg_pct"]) for name in sector_names if name in quotes]
+    available_sectors = [
+        (name, quotes[name]["chg_pct"]) for name in sector_names
+        if name in quotes and not (for_digest and bar_status(name, quotes[name]).startswith("provisional"))
+    ]
     if available_sectors:
         ranked = sorted(available_sectors, key=lambda item: item[1], reverse=True)
         lines.append("SECTOR RELATIVE PERFORMANCE (daily bars; available sectors only):")

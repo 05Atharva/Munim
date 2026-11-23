@@ -67,8 +67,8 @@ Send `/help` to the bot. The first reply after idle time can take longer because
 
 ## Research inputs and memory
 
-- Yahoo Finance provides unofficial daily bars. The latest bar can be provisional. Munim uses the date on each quote and treats news explanations as hypotheses.
-- Reports include selected links from fetched headlines. Sector index returns provide context. Exchange-wide breadth, verified institutional flows, earnings calendars and company announcements still need dedicated data sources.
+- Yahoo Finance provides unofficial daily bars. The briefing labels equity session status and withholds provisional closes or non-equity bars with unverified settlement times from its analysis. The raw snapshot remains in Supabase.
+- Reports use short sections with bold Telegram headings and clickable source references. A second Groq pass checks the draft against its evidence. If that review fails, the bot sends observed data only. Exchange-wide breadth, verified institutional flows, earnings calendars and company announcements still need dedicated data sources.
 - Original report snapshots, observations and source links are kept in Supabase. Repeating a similar note does not increase its confidence. Evidence-based confidence changes still depend on the model's interpretation. Predictions need independent verification before the scorecard changes.
 - Recent reports and memory are sent to Groq when generating the next reply. The private Telegram chat can store explicitly provided preferences.
 

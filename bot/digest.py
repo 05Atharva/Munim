@@ -2,7 +2,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import market_data, memory, prompts
+from . import market_data, memory, prompts, report
 from .config import Config
 from .llm import LLMError
 from .telegram import TelegramRejected, send_message
@@ -29,7 +29,8 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
     print(f"Market inputs: {len(quotes)} quotes, {len(headlines)} headlines")
     if not quotes and not headlines:
         raise RuntimeError("No market quotes or headlines fetched. Check the feeds and retry.")
-    snapshot = market_data.format_snapshot(quotes, headlines)
+    snapshot = market_data.format_snapshot(quotes, headlines, for_digest=True)
+    title = f"{'Morning briefing' if slot == 'morning' else 'Evening wrap'} · {now.strftime('%a %d %b')}"
 
     system = prompts.PERSONA.format(name=cfg.bot_name)
     user = prompts.DIGEST_USER.format(
@@ -39,28 +40,31 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
         recent=memory.render_recent_digests(store, 2),
         history=memory.render_recent_observations(store, 3),
         snapshot=snapshot,
-        digest_format=prompts.DIGEST_FORMAT.format(
-            title=f"{'Morning briefing' if slot == 'morning' else 'Evening wrap'} - {now.strftime('%a %d %b')}"),
     )
 
-    result = llm.complete_json(system, user, temperature=0.4, max_tokens=2200)
-    raw_message = result.get("message")
-    message = raw_message.strip() if isinstance(raw_message, str) else ""
-    if not 40 <= len(message) <= 2000:
-        raise LLMError("Model report must be between 40 and 2,000 characters")
-    references = result.get("source_ids")
-    links = market_data.source_links(headlines, references) if isinstance(references, list) else ""
-    message += links
+    result = llm.complete_json(system, user, temperature=0.25, max_tokens=2200)
+    if not isinstance(result.get("market_context"), str) or not isinstance(result.get("possible_drivers"), list):
+        raise LLMError("Model report is missing the market context or driver list.")
+    _, draft_sources = report.prepare_report(result, headlines)
+    try:
+        reviewed = report.review_report(llm, result, quotes, draft_sources)
+    except LLMError:
+        print("Report review unavailable. Using observed data only.")
+        reviewed, result = {}, {}
+    reviewed_headlines = [item if sid in draft_sources else {} for sid, item in enumerate(headlines, 1)]
+    explanations, sources = report.prepare_report(reviewed, reviewed_headlines)
+    message = report.render_report(title, quotes, reviewed, explanations, sources)
 
     if cfg.dry_run:
         print(message)
         return {"message": message, "learning": {}}
 
-    if links:
-        seen_urls = {item.get("url") for report in store.recent_digests(6)
-                     for item in (report.get("snapshot") or {}).get("headlines", [])}
-        fresh_headlines = [item if item.get("url") not in seen_urls else {} for item in headlines]
-        links = market_data.source_links(fresh_headlines, references)
+    if sources:
+        seen_urls = {item.get("url") for previous in store.recent_digests(6)
+                     for item in (previous.get("snapshot") or {}).get("headlines", [])}
+        fresh_sources = set(sources) - {sid for sid, item in sources.items() if item["url"] in seen_urls}
+    else:
+        fresh_sources = set()
 
     retrieved = datetime.now(ZoneInfo("UTC")).isoformat()
     snapshot_record = {"quotes": quotes, "headlines": headlines, "retrieved_at": retrieved}
@@ -69,7 +73,8 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
         raise RuntimeError("A concurrent run claimed this digest. Check its result before retrying.")
     try:
         if send is None:
-            send_message(cfg.telegram_token, cfg.telegram_chat_id, message)
+            telegram_message = report.render_report(title, quotes, reviewed, explanations, sources, html=True)
+            send_message(cfg.telegram_token, cfg.telegram_chat_id, telegram_message, parse_mode="HTML")
         else:
             send(message)
     except TelegramRejected:
@@ -79,7 +84,14 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
     store.add_observation({"day": day, "slot": slot, "quotes": quotes, "retrieved_at": retrieved})
     for item in headlines:
         store.add_evidence({"day": day, "slot": slot, **item})
-    if not links:
+    if not fresh_sources:
         result = {**result, "reinforce_ids": [], "challenge_ids": []}
-    stats = memory.apply_learning(store, result, today, note_kinds=memory.VALID_KINDS - {"user"})
+    hypotheses = [
+        note for note in memory.model_list(reviewed, "new_notes", 2)
+        if isinstance(note, dict) and note.get("kind") == "hypothesis"
+        and type(note.get("confidence")) in (int, float) and 0.2 <= note["confidence"] <= 0.5
+        and any(type(sid) is int and sid in fresh_sources for sid in memory.model_list(note, "source_ids", 3))
+    ]
+    stats = memory.apply_learning(store, {**result, "new_notes": hypotheses}, today,
+                                  note_kinds=memory.VALID_KINDS - {"user"})
     return {"message": message, "learning": stats}

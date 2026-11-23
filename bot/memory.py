@@ -93,7 +93,7 @@ def render_recent_observations(store, n: int = 5) -> str:
         quotes = payload.get("quotes") or {}
         selected = []
         for key in ("Nifty 50", "Nifty Bank", "Nifty Midcap 150", "Nifty Smallcap 250",
-                    "Nifty Midcap 100", "Nifty Smallcap 100", "S&P 500", "USD/INR", "Brent crude"):
+                    "Nifty Midcap 100", "Nifty Smallcap 100"):
             if key in quotes:
                 quote = quotes[key]
                 selected.append(f"{key} {quote.get('chg_pct', 'n/a')}% [{quote.get('quote_time', 'unknown')[:10]}]")

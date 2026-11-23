@@ -12,7 +12,7 @@ from bot.chat import handle_message
 from bot.config import Config
 from bot.consolidate import run_consolidation
 from bot.digest import run_digest
-from bot.llm import parse_json
+from bot.llm import LLMError, parse_json
 from bot.store import LocalStore
 from bot.telegram import TelegramRejected, _split, private_chat_ids
 from bot.store import SupabaseStore
@@ -24,6 +24,8 @@ class FakeLLM:
         self.calls = []
 
     def complete_json(self, system, user, **kw):
+        if user.startswith("Review this draft market briefing"):
+            return json.loads(user.split("\nDraft:\n", 1)[1].split("\n\nEvidence:\n", 1)[0])
         self.calls.append((system, user, kw))
         return self.responses.pop(0)
 
@@ -37,21 +39,31 @@ def make(tmp_path):
 QUOTES = {"Nifty 50": {"last": 25482.45, "prev": 25800.6, "chg_pct": -1.23}}
 HEADS = [{"source": "ET", "title": "Banks and metals drag Sensex as rupee slips past 93",
           "summary": "", "url": "https://example.com/market-wrap"}]
-MSG = "*Evening wrap*\nNifty fell 1.23% as banks and metals dragged while the rupee weakened. " * 2
+
+
+def model_report(**updates):
+    return {
+        "market_context": "Banks and metals underperformed.",
+        "possible_drivers": [{"interpretation": "The report links a weaker rupee to dollar demand.", "source_ids": [1]}],
+        "watch": "Watch whether bank stocks continue to lag.",
+        **updates,
+    }
 
 
 def test_digest_saves_learning_and_message(tmp_path):
     cfg, store = make(tmp_path)
     sent = []
-    llm = FakeLLM([{
-        "message": MSG,
-        "new_notes": [{"kind": "pattern", "content": "Rupee weakness often coincides with FII selling in banks.",
-                       "tags": ["rupee"], "confidence": 0.5}],
-        "predictions": [{"claim": "Smallcap index will underperform Nifty over the next 5 sessions",
-                         "check_by": (date.today() + timedelta(days=7)).isoformat()}],
-    }])
+    llm = FakeLLM([model_report(
+        new_notes=[
+            {"kind": "hypothesis", "content": "Rupee weakness may coincide with selling in banks.",
+             "tags": ["rupee"], "confidence": 0.5, "source_ids": [1]},
+            {"kind": "pattern", "content": "Banks always fall when the rupee weakens.", "source_ids": [1]},
+        ],
+        predictions=[{"claim": "Smallcap index will underperform Nifty over the next 5 sessions",
+                      "check_by": (date.today() + timedelta(days=7)).isoformat()}],
+    )])
     out = run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS, send=sent.append)
-    assert sent and "Nifty fell" in sent[0]
+    assert sent and "Nifty 50 25,482.45 (-1.23%)" in sent[0]
     assert out["learning"]["new"] == 1 and out["learning"]["predictions"] == 1
     assert len(store.recent_digests()) == 1
     # the fresh data must have reached the prompt, and the persona must forbid advice
@@ -64,7 +76,9 @@ def test_memory_feeds_back_and_reinforces(tmp_path):
     cfg, store = make(tmp_path)
     n = store.add_note("pattern", "Midcaps fall harder than Nifty on risk-off days.", ["midcap"], 0.5)
     sent = []
-    result = {"message": MSG, "reinforce_ids": [n["id"]], "source_ids": [1, 42, "https://example.com/invalid"]}
+    result = model_report(reinforce_ids=[n["id"]], possible_drivers=[
+        {"interpretation": "Bank stocks weakened after FX volatility.", "source_ids": [1, 42, "invalid"]},
+    ])
     llm = FakeLLM([result, result])
     run_digest(cfg, store, llm, "morning", quotes=QUOTES, headlines=HEADS, send=sent.append)
     assert f"[#{n['id']} c=0.50]" in llm.calls[0][1]          # memory reached the prompt
@@ -142,10 +156,10 @@ def test_long_messages_split_for_telegram():
 def test_digest_duplicate_is_skipped(tmp_path):
     cfg, store = make(tmp_path)
     sent = []
-    llm = FakeLLM([{"message": MSG}])
+    llm = FakeLLM([model_report()])
     first = run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS, send=sent.append)
     second = run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS, send=sent.append)
-    assert first["message"] == MSG.strip()
+    assert first["message"] == sent[0]
     assert second["skipped"].startswith("digest already recorded")
     assert len(sent) == 1 and len(llm.calls) == 1
 
@@ -169,6 +183,60 @@ def test_market_snapshot_labels_daily_data_and_missing_breadth():
     assert "MARKET BREADTH: unavailable" in rendered
 
 
+def test_market_snapshot_distinguishes_us_intraday_and_fx_direction():
+    from bot.market_data import format_snapshot
+
+    observation = {"quote_time": "2026-11-23 00:00:00", "retrieved_at": "2026-11-23T16:05:00+00:00"}
+    quotes = {
+        "Nifty 50": {**observation, "last": 25349.65, "chg_pct": -1.75},
+        "S&P 500": {**observation, "last": 7245.34, "chg_pct": 4.85},
+        "USD/INR": {**observation, "last": 92.9, "chg_pct": -0.42},
+        "US 10Y yield": {**observation, "last": 4.95, "chg_pct": 0.69, "change_bps": 3.4},
+    }
+    rendered = format_snapshot(quotes, [])
+    assert "Nifty 50: 25,349.65 (-1.75%); session=2026-11-23; after regular session" in rendered
+    assert "S&P 500: 7,245.34 (+4.85%); session=2026-11-23; provisional intraday bar" in rendered
+    assert "USD/INR lower, implying a stronger rupee" in rendered
+    assert "US 10Y yield: 4.95% (+3.4 bps)" in rendered
+    digest_input = format_snapshot(quotes, [], for_digest=True)
+    assert "+4.85%" not in digest_input
+    assert "₹92.90" not in digest_input
+    assert "25,349.65" in digest_input
+
+
+def test_digest_sends_escaped_html_with_verified_links(tmp_path, monkeypatch):
+    cfg, store = make(tmp_path)
+    sent = {}
+    llm = FakeLLM([model_report(market_context="Banks & metals < weaker than IT.")])
+
+    def send_message(token, chat_id, text, *, parse_mode):
+        sent.update(text=text, parse_mode=parse_mode)
+
+    monkeypatch.setattr("bot.digest.send_message", send_message)
+    out = run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS)
+    assert sent["parse_mode"] == "HTML"
+    assert "<b>📊 Market moves</b>" in sent["text"]
+    assert "Banks &amp; metals &lt; weaker than IT." in sent["text"]
+    assert '<a href="https://example.com/market-wrap">[1] ET</a>' in sent["text"]
+    assert "Banks & metals < weaker than IT." in out["message"]
+    assert "<a href=" not in store.recent_digests()[0]["content"]
+
+
+def test_digest_review_failure_sends_observations_without_unreviewed_analysis(tmp_path, monkeypatch):
+    cfg, store = make(tmp_path)
+    llm = FakeLLM([model_report()])
+    sent = []
+
+    def unavailable(*args):
+        raise LLMError("review call failed")
+
+    monkeypatch.setattr("bot.report.review_report", unavailable)
+    run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS, send=sent.append)
+    assert "Nifty 50 25,482.45" in sent[0]
+    assert "Banks and metals underperformed." not in sent[0]
+    assert "The briefing has no source-backed explanation" in sent[0]
+
+
 def test_recent_observations_are_available_to_memory(tmp_path):
     _, store = make(tmp_path)
     store.add_observation({"day": "2026-11-20", "slot": "evening", "quotes": QUOTES})
@@ -187,7 +255,7 @@ def test_telegram_help_commands_do_not_call_llm(tmp_path):
 def test_preview_leaves_slot_and_memory_untouched(tmp_path):
     cfg, store = make(tmp_path)
     cfg.dry_run = True
-    llm = FakeLLM([{"message": MSG, "new_notes": [{"kind": "lesson", "content": "Test result only."}]}])
+    llm = FakeLLM([model_report(new_notes=[{"kind": "hypothesis", "content": "Test result only.", "source_ids": [1]}])])
     sent = []
     run_digest(cfg, store, llm, "evening", quotes=QUOTES, headlines=HEADS, send=sent.append)
     assert not sent and not store.recent_digests() and not store.active_notes()
@@ -196,7 +264,7 @@ def test_preview_leaves_slot_and_memory_untouched(tmp_path):
 
 def test_delivery_timeout_requires_reconciliation(tmp_path):
     cfg, store = make(tmp_path)
-    llm = FakeLLM([{"message": MSG}])
+    llm = FakeLLM([model_report()])
 
     def timeout(_):
         raise RuntimeError("simulated network timeout")
@@ -210,7 +278,7 @@ def test_delivery_timeout_requires_reconciliation(tmp_path):
 
 def test_explicit_delivery_rejection_allows_retry(tmp_path):
     cfg, store = make(tmp_path)
-    llm = FakeLLM([{"message": MSG}, {"message": MSG}])
+    llm = FakeLLM([model_report(), model_report()])
 
     def reject(_):
         raise TelegramRejected("simulated rejection")
