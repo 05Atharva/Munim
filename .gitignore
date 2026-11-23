@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+munim_local_store.json
+*.sqlite3
+.env
+.env.*
+!.env.example
