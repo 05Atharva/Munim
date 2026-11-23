@@ -8,6 +8,7 @@
   python -m bot.run set-webhook https://your-service.onrender.com/telegram
 """
 import sys
+from getpass import getpass
 
 from .config import Config
 from .llm import GroqLLM
@@ -31,7 +32,13 @@ def main(argv=None) -> int:
         return 0
     if cmd == "chat-id":
         try:
-            ids = private_chat_ids(cfg.telegram_token)
+            token = cfg.telegram_token
+            if not token and sys.stdin.isatty():
+                token = getpass("Paste the BotFather token (hidden): ").strip()
+            ids = private_chat_ids(token)
+        except (EOFError, KeyboardInterrupt):
+            print("\nChat ID lookup cancelled.", file=sys.stderr)
+            return 2
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2

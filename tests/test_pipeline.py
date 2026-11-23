@@ -267,3 +267,20 @@ def test_chat_id_explains_existing_webhook(monkeypatch):
     monkeypatch.setattr("bot.telegram._api_request", request)
     with pytest.raises(RuntimeError, match="webhook is already registered"):
         private_chat_ids("test-token")
+
+
+def test_chat_id_prompts_for_token_in_interactive_shell(monkeypatch, capsys):
+    from types import SimpleNamespace
+    from bot import run
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(run.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(run, "getpass", lambda prompt: " test-token ")
+
+    def fetch_ids(token):
+        assert token == "test-token"
+        return [42]
+
+    monkeypatch.setattr(run, "private_chat_ids", fetch_ids)
+    assert run.main(["chat-id"]) == 0
+    assert capsys.readouterr().out == "TELEGRAM_CHAT_ID=42\n"

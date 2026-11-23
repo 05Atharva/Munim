@@ -70,7 +70,7 @@ def check_private_chat(token: str, chat_id: str) -> None:
 
 def private_chat_ids(token: str) -> list:
     if not token:
-        raise RuntimeError("Set TELEGRAM_BOT_TOKEN in this PowerShell window before running chat-id.")
+        raise RuntimeError("Enter the BotFather token when prompted, or set TELEGRAM_BOT_TOKEN for noninteractive use.")
     bot = _api_request(token, "getMe", {})
     if bot.status_code in {401, 404}:
         raise RuntimeError("Telegram rejected the token. Recopy the full token for this bot from BotFather.")
