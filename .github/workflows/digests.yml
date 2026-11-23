@@ -3,7 +3,7 @@ name: Munim digests
 # IST = UTC+5:30. Run off the top of the hour to reduce GitHub queue delays.
 on:
   schedule:
-    - cron: "5 3 * * *"   # Morning every day at 08:35 IST
+    - cron: "45 4 * * *"  # Morning every day at 10:15 IST
     - cron: "45 12 * * *" # Evening every day at 18:15 IST
     - cron: "30 4 * * 0"  # Weekly memory review on Sunday at 10:00 IST
   workflow_dispatch:
@@ -50,7 +50,7 @@ jobs:
           set -eu
           if [ "$EVENT" = schedule ]; then
             case "$SCHEDULE" in
-              "5 3 * * *") TASK=morning ;;
+              "45 4 * * *") TASK=morning ;;
               "45 12 * * *") TASK=evening ;;
               "30 4 * * 0") TASK=consolidate ;;
               *) echo "Unknown schedule" >&2; exit 1 ;;

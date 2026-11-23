@@ -2,7 +2,8 @@
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -204,6 +205,56 @@ def test_market_snapshot_distinguishes_us_intraday_and_fx_direction():
     assert "25,349.65" in digest_input
 
 
+def test_opening_quote_excludes_unfinished_bars_and_uses_previous_close():
+    import pandas as pd
+    from bot.market_data import _opening_quote
+
+    now = datetime(2026, 11, 23, 10, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+    timestamps = pd.to_datetime([
+        "2026-11-20T10:10:00+05:30", "2026-11-23T09:15:00+05:30",
+        "2026-11-23T10:10:00+05:30", "2026-11-23T10:15:00+05:30",
+    ], utc=True)
+    bars = pd.DataFrame({"Open": [100, 103, 105, 106], "Close": [101, 104, 106, 110]}, index=timestamps)
+    daily = {"last": 112, "prev": 100, "quote_time": "2026-11-23", "previous_quote_time": "2026-11-20"}
+
+    quote = _opening_quote(bars, daily, now)
+    assert quote["as_of"] == "2026-11-23T10:15:00+05:30"
+    assert quote["last"] == 106
+    assert quote["chg_pct"] == 6
+    assert quote["previous_session"] == "2026-11-20"
+    assert quote["since_open_pct"] == 2.91
+    assert _opening_quote(bars, daily, now + timedelta(days=1)) is None
+    assert _opening_quote(bars, daily, now + timedelta(minutes=36)) is None
+
+
+def test_morning_digest_renders_and_saves_timestamped_intraday_moves(tmp_path):
+    cfg, store = make(tmp_path)
+    llm = FakeLLM([model_report()])
+    opening = {"Nifty 50": {"last": 25523.15, "chg_pct": 0.27, "as_of": "2026-11-23T10:10:00+05:30",
+                            "since_open_pct": -0.08}}
+    sent = []
+    run_digest(cfg, store, llm, "morning", quotes=QUOTES, headlines=HEADS, opening_quotes=opening, send=sent.append)
+    assert "25,523.15 (+0.27% vs previous close) · 10:10 IST" in sent[0]
+    assert "Quotes may be delayed" in sent[0]
+    assert "-0.08% since open" in llm.calls[0][1]
+    assert store.recent_digests()[0]["snapshot"]["opening_quotes"] == opening
+    assert store.recent_observations()[0]["observation"]["opening_quotes"] == opening
+
+
+def test_morning_digest_falls_back_to_completed_close_without_intraday_quotes(tmp_path):
+    cfg, store = make(tmp_path)
+    llm = FakeLLM([model_report()])
+    quotes = {
+        "Nifty 50": {"last": 25500, "chg_pct": -0.3, "quote_time": "2026-11-23",
+                     "previous_quote_time": "2026-11-20", "prev": 25700, "retrieved_at": "2026-11-23T04:45:00+00:00"},
+    }
+    sent = []
+    run_digest(cfg, store, llm, "morning", quotes=quotes, headlines=HEADS, send=sent.append)
+    assert "Current Indian intraday quotes were unavailable" in sent[0]
+    assert "25,700.00" in sent[0] and "2026-11-20 prior close" in sent[0]
+    assert "25,500.00" not in sent[0]
+
+
 def test_digest_sends_escaped_html_with_verified_links(tmp_path, monkeypatch):
     cfg, store = make(tmp_path)
     sent = {}
@@ -227,7 +278,7 @@ def test_digest_review_failure_sends_observations_without_unreviewed_analysis(tm
     llm = FakeLLM([model_report()])
     sent = []
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise LLMError("review call failed")
 
     monkeypatch.setattr("bot.report.review_report", unavailable)

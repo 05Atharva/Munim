@@ -8,8 +8,8 @@ from .llm import LLMError
 from .telegram import TelegramRejected, send_message
 
 
-def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=None, send=None) -> dict:
-    """slot: 'morning' | 'evening'. quotes/headlines/send can be injected for testing."""
+def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=None, opening_quotes=None, send=None) -> dict:
+    """Run a morning or evening digest, with injectable market inputs for tests."""
     if slot not in prompts.SLOT_FOCUS:
         raise ValueError("slot must be 'morning' or 'evening'")
 
@@ -24,13 +24,19 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
         if status == "sending":
             raise RuntimeError(f"Delivery unconfirmed for {day} {slot}. Check Telegram before clearing the sending row.")
 
-    quotes = market_data.fetch_quotes() if quotes is None else quotes
+    fetch_live = quotes is None
+    quotes = market_data.fetch_quotes() if fetch_live else quotes
+    if slot == "morning":
+        if opening_quotes is None:
+            opening_quotes = market_data.fetch_opening_quotes(quotes, now) if fetch_live else {}
+    else:
+        opening_quotes = None
     headlines = (market_data.fetch_headlines() if headlines is None else headlines)[:18]
-    print(f"Market inputs: {len(quotes)} quotes, {len(headlines)} headlines")
-    if not quotes and not headlines:
+    print(f"Market inputs: {len(quotes)} daily quotes, {len(opening_quotes or {})} intraday quotes, {len(headlines)} headlines")
+    if not quotes and not headlines and not opening_quotes:
         raise RuntimeError("No market quotes or headlines fetched. Check the feeds and retry.")
-    snapshot = market_data.format_snapshot(quotes, headlines, for_digest=True)
-    title = f"{'Morning briefing' if slot == 'morning' else 'Evening wrap'} · {now.strftime('%a %d %b')}"
+    snapshot = market_data.format_snapshot(quotes, headlines, for_digest=True, opening_quotes=opening_quotes)
+    title = f"{'Morning market update' if slot == 'morning' else 'Evening wrap'} · {now.strftime('%a %d %b')}"
 
     system = prompts.PERSONA.format(name=cfg.bot_name)
     user = prompts.DIGEST_USER.format(
@@ -47,13 +53,13 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
         raise LLMError("Model report is missing the market context or driver list.")
     _, draft_sources = report.prepare_report(result, headlines)
     try:
-        reviewed = report.review_report(llm, result, quotes, draft_sources)
+        reviewed = report.review_report(llm, result, quotes, draft_sources, opening_quotes=opening_quotes)
     except LLMError:
         print("Report review unavailable. Using observed data only.")
         reviewed, result = {}, {}
     reviewed_headlines = [item if sid in draft_sources else {} for sid, item in enumerate(headlines, 1)]
     explanations, sources = report.prepare_report(reviewed, reviewed_headlines)
-    message = report.render_report(title, quotes, reviewed, explanations, sources)
+    message = report.render_report(title, quotes, reviewed, explanations, sources, opening_quotes=opening_quotes)
 
     if cfg.dry_run:
         print(message)
@@ -68,12 +74,17 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
 
     retrieved = datetime.now(ZoneInfo("UTC")).isoformat()
     snapshot_record = {"quotes": quotes, "headlines": headlines, "retrieved_at": retrieved}
+    observations = {"day": day, "slot": slot, "quotes": quotes, "retrieved_at": retrieved}
+    if opening_quotes is not None:
+        snapshot_record["opening_quotes"] = opening_quotes
+        observations["opening_quotes"] = opening_quotes
     digest_id = store.claim_digest(slot, day, message, snapshot_record)
     if digest_id is None:
         raise RuntimeError("A concurrent run claimed this digest. Check its result before retrying.")
     try:
         if send is None:
-            telegram_message = report.render_report(title, quotes, reviewed, explanations, sources, html=True)
+            telegram_message = report.render_report(title, quotes, reviewed, explanations, sources, html=True,
+                                                    opening_quotes=opening_quotes)
             send_message(cfg.telegram_token, cfg.telegram_chat_id, telegram_message, parse_mode="HTML")
         else:
             send(message)
@@ -81,7 +92,7 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
         store.release_digest(digest_id)
         raise
     store.mark_digest_sent(digest_id)
-    store.add_observation({"day": day, "slot": slot, "quotes": quotes, "retrieved_at": retrieved})
+    store.add_observation(observations)
     for item in headlines:
         store.add_evidence({"day": day, "slot": slot, **item})
     if not fresh_sources:

@@ -2,7 +2,7 @@
 
 Munim is a personal Indian-market research companion. It gathers daily market bars and RSS headlines, compares them with earlier reports and notes, and sends two Telegram briefings each day. Each briefing explains the observed moves, plausible drivers, competing explanations and one thing to check in the next session.
 
-GitHub Actions runs the Python jobs at **08:35 IST** and **18:15 IST** daily. A Sunday job reviews the research notes at **10:00 IST**. Weekend reports use the last observed Indian session and developments since then. Supabase stores reports, observed data, source evidence, notes and predictions. The model uses this memory in later runs without fine-tuning.
+GitHub Actions runs the Python jobs at **10:15 IST** and **18:15 IST** daily. The morning update uses timestamped five-minute Indian index bars when available, and the evening update covers the close. A Sunday job reviews the research notes at **10:00 IST**. On weekends, holidays or missing intraday data, the morning report uses the last available session and relevant news. Supabase stores reports, observed data, source evidence, notes and predictions. The model uses this memory in later runs without fine-tuning.
 
 ## Set up Supabase
 

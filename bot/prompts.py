@@ -34,9 +34,12 @@ Telegram style: short paragraphs, readable on mobile, restrained Markdown, warm 
 
 SLOT_FOCUS = {
     "morning": (
-        "Morning slot. For a weekday, cover overnight developments, the last confirmed Indian close and "
-        "one or two things to watch in the next session. For a weekend or holiday, state the last observed "
-        "session and cover developments since then. Treat any bar from an open session as provisional."
+        "Morning market update, scheduled for 10:15 IST. Start with how the current Indian session is "
+        "trading. Use timestamped five-minute bars for moves versus the previous close, and explicitly "
+        "label a move since the open when comparing that baseline. Call out one meaningful sector divergence "
+        "and one thing to watch into the close. Overnight news is context when it bears on the observed move. "
+        "If same-session bars are missing, state the gap and use the last dated Indian session with relevant news. "
+        "Do not assume an outage or holiday without evidence."
     ),
     "evening": (
         "Evening slot. Check the date on the Indian index bars before describing this session. On weekends, "
@@ -115,6 +118,8 @@ with market_context, possible_drivers (each with interpretation and source_ids),
 Keep analysis that survives the checks. Remove or rewrite questionable sentences without adding new claims.
 
 - Check numerical direction, instrument, timing and whether a move is a completed close.
+- For intraday figures, keep the observation timestamp and distinguish changes versus the previous
+  close from changes since the open. Do not substitute a daily bar for a missing intraday reading.
 - Keep market_context to observed index or sector moves and timing. Remove unsupported claims about a
   move being rare, record-setting or part of a streak. Put news claims only in the sourced driver field.
 - Do not characterize a sector as rate-sensitive or an asset as a safe haven to explain the move

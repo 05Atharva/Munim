@@ -3,10 +3,11 @@ Every source is wrapped so one failure never kills the digest - the bot just say
 import re
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 from html import unescape
+from math import isfinite
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 US_EQUITIES = {"S&P 500", "Nasdaq"}
 INDIAN_EQUITIES = {"Sensex", "India VIX"}
 NON_EQUITY_BARS = {"USD/INR", "Brent crude", "Gold (USD)", "US 10Y yield", "Dollar index"}
+OPENING_INDICES = ("Nifty 50", "Sensex", "Nifty Bank", "Nifty IT", "Nifty Metal")
+INDIA_ZONE = "Asia/Kolkata"
+INDIA_OPEN = time(9, 15)
+BAR_INTERVAL = timedelta(minutes=5)
 
 # Yahoo Finance symbols. (name -> symbol)
 TICKERS = {
@@ -57,6 +62,14 @@ FEEDS = {
 }
 
 
+def _ticker_frame(raw, symbol: str):
+    if raw.columns.nlevels == 1:
+        return raw
+    if symbol in raw.columns.get_level_values(0):
+        return raw[symbol]
+    return raw.xs(symbol, axis=1, level=1)
+
+
 def fetch_quotes() -> dict:
     """Fetch daily quotes in one batch. Values are explicitly labelled with source and timestamps."""
     try:
@@ -70,14 +83,7 @@ def fetch_quotes() -> dict:
         retrieved = datetime.now(timezone.utc).isoformat()
         for name, sym in TICKERS.items():
             try:
-                if hasattr(raw.columns, "levels") and sym in raw.columns.get_level_values(0):
-                    frame = raw[sym]
-                    close_series = frame["Close"]
-                elif hasattr(raw.columns, "levels") and sym in raw.columns.get_level_values(1):
-                    close_series = raw.xs("Close", axis=1, level=0)[sym]
-                else:
-                    close_series = raw["Close"]
-                closes = close_series.dropna()
+                closes = _ticker_frame(raw, sym)["Close"].dropna()
                 if len(closes) < 2:
                     continue
                 last, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
@@ -85,7 +91,8 @@ def fetch_quotes() -> dict:
                     continue
                 out[name] = {"last": round(last, 2), "prev": round(prev, 2),
                              "chg_pct": round((last - prev) / prev * 100, 2),
-                             "quote_time": str(closes.index[-1]), "retrieved_at": retrieved,
+                             "quote_time": str(closes.index[-1]), "previous_quote_time": str(closes.index[-2]),
+                             "retrieved_at": retrieved,
                              "source": "Yahoo Finance (unofficial)", "period": "daily bar"}
                 if name == "US 10Y yield":
                     out[name]["change_bps"] = round((last - prev) * 100, 1)
@@ -94,6 +101,79 @@ def fetch_quotes() -> dict:
     except Exception:
         return {}
     return out
+
+
+def _prior_close(daily: dict, session_day: str) -> tuple:
+    """Compare with the latest completed daily session, even if today's daily bar is provisional."""
+    daily_day = daily.get("quote_time", "")[:10]
+    if daily_day and daily_day < session_day:
+        return daily["last"], daily_day
+    prior_day = daily.get("previous_quote_time", "")[:10]
+    if daily_day == session_day and prior_day and prior_day < session_day:
+        return daily["prev"], prior_day
+    return None, None
+
+
+def _opening_quote(bars, daily: dict, now: datetime) -> dict | None:
+    if bars.empty or bars.index.tz is None:
+        return None
+    local = bars.tz_convert(INDIA_ZONE).sort_index()
+    session_open = datetime.combine(now.date(), INDIA_OPEN, now.tzinfo)
+    completed = local.loc[(local.index >= session_open) & (local.index + BAR_INTERVAL <= now)]
+    closes = completed["Close"].dropna()
+    if closes.empty:
+        return None
+    bar_end = closes.index[-1] + BAR_INTERVAL
+    if now - bar_end > timedelta(minutes=30):
+        return None
+    last = float(closes.iloc[-1])
+    if not isfinite(last) or last <= 0:
+        return None
+    previous, previous_day = _prior_close(daily, now.date().isoformat())
+    output = {"last": round(last, 2), "as_of": bar_end.isoformat(), "source": "Yahoo Finance (unofficial)",
+              "previous_session": previous_day, "chg_pct": round((last - previous) / previous * 100, 2)
+              if previous else None}
+    if completed.index[0] == session_open:
+        opening = float(completed["Open"].iloc[0])
+        if isfinite(opening) and opening > 0:
+            output["session_open"] = round(opening, 2)
+            output["since_open_pct"] = round((last - opening) / opening * 100, 2)
+    return output
+
+
+def fetch_opening_quotes(daily_quotes: dict, now: datetime) -> dict:
+    """Fetch same-session five-minute bars. Skip stale, incomplete or untimestamped quotes."""
+    local = now.astimezone(ZoneInfo(INDIA_ZONE))
+    if not time(9, 20) <= local.time() < time(15, 30):
+        return {}
+    try:
+        import yfinance as yf
+
+        raw = yf.download([TICKERS[name] for name in OPENING_INDICES], period="5d", interval="5m",
+                          group_by="ticker", auto_adjust=False, progress=False, threads=True,
+                          ignore_tz=False, timeout=10)
+    except Exception:
+        logger.warning("Opening price feed unavailable")
+        return {}
+    opening_quotes = {}
+    for name in OPENING_INDICES:
+        try:
+            quote = _opening_quote(_ticker_frame(raw, TICKERS[name]), daily_quotes.get(name, {}), local)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if quote:
+            opening_quotes[name] = quote
+    return opening_quotes
+
+
+def opening_move(name: str, quote: dict, *, include_open=False) -> str:
+    as_of = datetime.fromisoformat(quote["as_of"]).astimezone(ZoneInfo(INDIA_ZONE))
+    line = f"{name} {quote['last']:,.2f}"
+    if quote["chg_pct"] is not None:
+        line += f" ({quote['chg_pct']:+.2f}% vs previous close)"
+    if include_open and "since_open_pct" in quote:
+        line += f"; {quote['since_open_pct']:+.2f}% since open"
+    return f"{line} · {as_of:%H:%M} IST"
 
 
 def _clean(text: str) -> str:
@@ -211,8 +291,17 @@ def quote_move(name: str, quote: dict) -> str:
     return f"{last:,.2f} ({change:+.2f}%)"
 
 
-def format_snapshot(quotes: dict, headlines: list, max_headlines: int = 18, *, for_digest: bool = False) -> str:
-    lines = ["MARKET LEVELS (daily bars vs previous bar; today's bar may be provisional):"]
+def format_snapshot(quotes: dict, headlines: list, max_headlines: int = 18, *, for_digest: bool = False,
+                    opening_quotes: dict | None = None) -> str:
+    lines = []
+    if opening_quotes is not None:
+        if opening_quotes:
+            lines.append("INDIAN INTRADAY MOVES (timestamped five-minute bars, may be delayed; not session closes):")
+            lines.extend(f"- {opening_move(name, q, include_open=True)}" for name, q in opening_quotes.items())
+        else:
+            lines.append("INDIAN INTRADAY MOVES: no current session bars available.")
+        lines.append("")
+    lines.append("MARKET LEVELS (daily bars vs previous bar; today's bar may be provisional):")
     if quotes:
         for name, q in quotes.items():
             status = bar_status(name, q)
