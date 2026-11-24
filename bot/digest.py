@@ -1,5 +1,5 @@
 """Twice-daily digest: gather data -> think with memory -> send to Telegram -> save what was learned."""
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from . import market_data, memory, prompts, report
@@ -7,14 +7,34 @@ from .config import Config
 from .llm import LLMError
 from .telegram import TelegramRejected, send_message
 
+DELIVERY_WINDOWS = {
+    "morning": (time(10, 15), time(11, 15)),
+    "evening": (time(18, 15), time(19, 15)),
+}
+
+
+def _scheduled_skip(slot: str, now: datetime, *, started: datetime | None = None) -> str | None:
+    india_zone = ZoneInfo(market_data.INDIA_ZONE)
+    local = now.astimezone(india_zone)
+    start, cutoff = DELIVERY_WINDOWS[slot]
+    same_day = started is None or started.astimezone(india_zone).date() == local.date()
+    if same_day and start <= local.time() < cutoff:
+        return None
+    return (f"Scheduled {slot} skipped at {local:%Y-%m-%d %H:%M} IST. "
+            f"Delivery window is {start:%H:%M}–{cutoff:%H:%M} IST on the report date.")
+
 
 def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=None, opening_quotes=None, send=None) -> dict:
     """Run a morning or evening digest, with injectable market inputs for tests."""
     if slot not in prompts.SLOT_FOCUS:
         raise ValueError("slot must be 'morning' or 'evening'")
 
-    now = datetime.now(ZoneInfo(cfg.timezone))
+    zone = ZoneInfo(cfg.timezone)
+    now = datetime.now(zone)
     today = now.date()
+
+    if cfg.scheduled_delivery and (reason := _scheduled_skip(slot, now)):
+        return {"skipped": reason, "learning": {}}
 
     day = today.isoformat()
     if not cfg.dry_run:
@@ -78,6 +98,8 @@ def run_digest(cfg: Config, store, llm, slot: str, *, quotes=None, headlines=Non
     if opening_quotes is not None:
         snapshot_record["opening_quotes"] = opening_quotes
         observations["opening_quotes"] = opening_quotes
+    if cfg.scheduled_delivery and (reason := _scheduled_skip(slot, datetime.now(zone), started=now)):
+        return {"skipped": reason, "learning": {}}
     digest_id = store.claim_digest(slot, day, message, snapshot_record)
     if digest_id is None:
         raise RuntimeError("A concurrent run claimed this digest. Check its result before retrying.")

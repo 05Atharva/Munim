@@ -38,8 +38,9 @@ SLOT_FOCUS = {
         "trading. Use timestamped five-minute bars for moves versus the previous close, and explicitly "
         "label a move since the open when comparing that baseline. Call out one meaningful sector divergence "
         "and one thing to watch into the close. Overnight news is context when it bears on the observed move. "
-        "If same-session bars are missing, state the gap and use the last dated Indian session with relevant news. "
-        "Do not assume an outage or holiday without evidence."
+        "If same-session bars are missing, state the gap and use the last dated Indian session and any "
+        "relevant developments since it. Do not describe a morning trading session unless the inputs show "
+        "one occurred. Do not assume an outage or holiday without evidence."
     ),
     "evening": (
         "Evening slot. Check the date on the Indian index bars before describing this session. On weekends, "

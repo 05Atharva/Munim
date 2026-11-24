@@ -4,7 +4,9 @@ name: Munim digests
 on:
   schedule:
     - cron: "45 4 * * *"  # Morning every day at 10:15 IST
+    - cron: "5 5 * * *"   # Morning fallback at 10:35 IST
     - cron: "45 12 * * *" # Evening every day at 18:15 IST
+    - cron: "5 13 * * *"  # Evening fallback at 18:35 IST
     - cron: "30 4 * * 0"  # Weekly memory review on Sunday at 10:00 IST
   workflow_dispatch:
     inputs:
@@ -39,6 +41,7 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
           TASK: ${{ inputs.task }}
           APP_ENV: production
+          MUNIM_SCHEDULED: ${{ github.event_name == 'schedule' && '1' || '0' }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
           LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL || secrets.LLM_FALLBACK_MODEL }}
@@ -50,8 +53,8 @@ jobs:
           set -eu
           if [ "$EVENT" = schedule ]; then
             case "$SCHEDULE" in
-              "45 4 * * *") TASK=morning ;;
-              "45 12 * * *") TASK=evening ;;
+              "45 4 * * *"|"5 5 * * *") TASK=morning ;;
+              "45 12 * * *"|"5 13 * * *") TASK=evening ;;
               "30 4 * * 0") TASK=consolidate ;;
               *) echo "Unknown schedule" >&2; exit 1 ;;
             esac

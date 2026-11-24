@@ -30,6 +30,8 @@ GitHub Actions runs the Python jobs at **10:15 IST** and **18:15 IST** daily. Th
 
 Use **GitHub Actions** to run the scheduled reports. Standard GitHub-hosted runners are free for public repositories. Supabase and Groq are used within their free-tier quotas. No computer needs to stay on. GitHub can delay scheduled runs and disables public schedules after 60 days without repository activity.
 
+Each report has a backup trigger 20 minutes after its main schedule. The database prevents duplicate delivery. A scheduled delivery can start from **10:15 to before 11:15 IST** or from **18:15 to before 19:15 IST** for its respective slot. Jobs that miss their window skip the report. Manual runs can be used outside these windows.
+
 1. Push the code to the repo's default branch. Open **Settings → Secrets and variables → Actions → New repository secret**. Add these five entries:
 
    | Name | Value |

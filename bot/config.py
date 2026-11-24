@@ -30,6 +30,7 @@ class Config:
     # --- Runtime safety ---
     app_env: str = field(default_factory=lambda: _env("APP_ENV", "production").lower())
     allow_local_store: bool = field(default_factory=lambda: _env("ALLOW_LOCAL_STORE") == "1")
+    scheduled_delivery: bool = field(default_factory=lambda: _env("MUNIM_SCHEDULED") == "1")
 
     # --- Behaviour ---
     bot_name: str = field(default_factory=lambda: _env("BOT_NAME", "Munim"))

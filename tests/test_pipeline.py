@@ -165,6 +165,64 @@ def test_digest_duplicate_is_skipped(tmp_path):
     assert len(sent) == 1 and len(llm.calls) == 1
 
 
+@pytest.mark.parametrize(("slot", "hour", "minute", "allowed"), [
+    ("morning", 10, 14, False),
+    ("morning", 10, 15, True),
+    ("morning", 10, 35, True),
+    ("morning", 11, 15, False),
+    ("morning", 20, 47, False),
+    ("evening", 18, 14, False),
+    ("evening", 18, 15, True),
+    ("evening", 18, 35, True),
+    ("evening", 19, 15, False),
+])
+def test_scheduled_delivery_window_uses_indian_time(slot, hour, minute, allowed):
+    from bot.digest import _scheduled_skip
+
+    india = ZoneInfo("Asia/Kolkata")
+    as_utc = datetime(2026, 11, 24, hour, minute, tzinfo=india).astimezone(ZoneInfo("UTC"))
+    assert (_scheduled_skip(slot, as_utc) is None) == allowed
+
+
+def test_late_scheduled_morning_skips_before_touching_services(monkeypatch):
+    class LateClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 24, 20, 47, tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(tz)
+
+    monkeypatch.setattr("bot.digest.datetime", LateClock)
+    cfg = Config(scheduled_delivery=True)
+    result = run_digest(cfg, object(), object(), "morning")
+    assert result["skipped"] == (
+        "Scheduled morning skipped at 2026-11-24 20:47 IST. "
+        "Delivery window is 10:15–11:15 IST on the report date."
+    )
+
+
+def test_scheduled_digest_crossing_cutoff_does_not_claim_or_send(tmp_path, monkeypatch):
+    india = ZoneInfo("Asia/Kolkata")
+    times = iter([
+        datetime(2026, 11, 24, 11, 14, tzinfo=india),
+        datetime(2026, 11, 24, 11, 15, tzinfo=india),
+        datetime(2026, 11, 24, 11, 15, tzinfo=india),
+    ])
+
+    class AdvancingClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(times).astimezone(tz)
+
+    monkeypatch.setattr("bot.digest.datetime", AdvancingClock)
+    cfg, store = make(tmp_path)
+    cfg.scheduled_delivery = True
+    sent = []
+    result = run_digest(cfg, store, FakeLLM([model_report()]), "morning", quotes=QUOTES, headlines=HEADS,
+                        send=sent.append)
+    assert "11:15 IST" in result["skipped"]
+    assert not sent
+    assert store.digest_status("morning", "2026-11-24") is None
+
+
 def test_production_requires_supabase(tmp_path):
     cfg = Config()
     cfg.app_env = "production"
