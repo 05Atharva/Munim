@@ -49,6 +49,14 @@ If Telegram delivery times out, inspect the private chat and the matching `sendi
 
 [GitHub repository secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets) · [Runner pricing](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job) · [Schedule limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
+### Give the reports an independent trigger with Supabase Cron
+
+1. Create a [fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new) scoped to `05Atharva/Munim` with **Actions → Read and write**. Save it in the Munim project's **Integrations → Vault** as `munim_github_dispatch_token`. Update the Vault value when the token is rotated.
+2. Run [supabase_cron.sql](supabase_cron.sql) in **SQL Editor**. Supabase will dispatch the work at **10:15 AM and 6:15 PM IST**, with GitHub's own schedules also available. All triggers share the database duplicate check and the delivery windows.
+3. Run `select munim_internal.dispatch_digest('check');` in SQL Editor. This queues a no-send readiness run on GitHub. Verify it under **Actions → Munim digests**. If no run appears, inspect the dispatch status with `select status_code, timed_out from net._http_response where id = YOUR_REQUEST_ID;`.
+
+[Supabase Cron](https://supabase.com/docs/guides/cron) · [GitHub workflow dispatch permissions](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+
 ## Optional two-way chat
 
 To ask Munim questions and use commands like `/report` and `/memory`, create a **Render Blueprint** from the repo using [render.yaml](render.yaml). Enter the same five values under the service's environment variables and add `TELEGRAM_WEBHOOK_SECRET`. Generate a random value locally and save the same value in Render and your temporary shell environment:

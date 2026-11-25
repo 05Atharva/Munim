@@ -15,6 +15,10 @@ on:
         type: choice
         options: [check, morning, evening, consolidate]
         default: check
+      scheduled_delivery:
+        description: "Apply the delivery window when dispatched by an external scheduler"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,7 +45,7 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
           TASK: ${{ inputs.task }}
           APP_ENV: production
-          MUNIM_SCHEDULED: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          MUNIM_SCHEDULED: ${{ (github.event_name == 'schedule' || inputs.scheduled_delivery) && '1' || '0' }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
           LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL || secrets.LLM_FALLBACK_MODEL }}
